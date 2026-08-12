@@ -129,6 +129,7 @@ def validate_models(
         print(json.dumps(summary, indent=2, ensure_ascii=False))
 
     result = {
+        "attack": str(attack_path),
         "models": summaries,
         "local_public_mean": (
             sum(item["score_normalized_0_to_1000"] for item in summaries) / len(summaries)
@@ -138,4 +139,3 @@ def validate_models(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return result
-
