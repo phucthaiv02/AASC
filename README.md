@@ -82,7 +82,15 @@ Với local endpoint, API key trống được tự chuyển thành placeholder 
 
 ## Artifacts
 
-Mỗi model ghi vào `artifacts/<model>/`:
+Mỗi lần validate tự tạo một thư mục theo tên file attack và thời điểm bắt đầu:
+
+```text
+artifacts/runs/<tên-file>_<YYYYMMDD_HHMMSS_microseconds>/
+```
+
+Ví dụ, `--attack attacks/live_fill_m47.py` có thể tạo
+`artifacts/runs/live_fill_m47_20260812_143005_123456/`. Mỗi model ghi vào thư mục con
+`<model>/` của run đó:
 
 - `summary.json`: score, số finding/cell và timing
 - `findings.jsonl`: các finding đã được evaluator replay và xác nhận
@@ -90,7 +98,31 @@ Mỗi model ghi vào `artifacts/<model>/`:
 - `framework.jsonl`: event log của framework
 - `agent-debug.jsonl`: request/response NIM đã loại trừ API key
 
-`artifacts/summary.json` chứa score từng model và trung bình `local_public_mean` giống notebook.
+`summary.json` ở thư mục run chứa score từng model và trung bình `local_public_mean` giống
+notebook. Vẫn có thể truyền `--artifacts-dir` nếu cần chỉ định thủ công một vị trí khác.
+
+## Attack variants và leaderboard
+
+Lưu các biến thể độc lập trong [`attacks/`](attacks/README.md). Tên file và timestamp được dùng
+tự động để giữ riêng kết quả của từng lần chạy:
+
+```bash
+aas-nim validate \
+  --attack attacks/live_fill_m47.py \
+  --budget-s 300
+```
+
+Tạo bảng xếp hạng từ toàn bộ summary bên dưới `artifacts/`:
+
+```bash
+aas-nim leaderboard
+```
+
+Lệnh in bảng trong terminal và tạo `artifacts/leaderboard.html`. Có thể xuất thêm CSV:
+
+```bash
+aas-nim leaderboard --csv artifacts/leaderboard.csv
+```
 
 ## Khác biệt cần lưu ý
 
