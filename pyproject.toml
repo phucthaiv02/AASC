@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aas-nim-validation"
+version = "0.1.0"
+description = "Validate AAS red-team attacks locally with NVIDIA NIM APIs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.109,<3",
+  "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.12"]
+sdk = ["aicomp-sdk==3.1.2"]
+
+[project.scripts]
+aas-nim = "aas_nim_validation.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
