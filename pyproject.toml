@@ -16,6 +16,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.12"]
 sdk = ["aicomp-sdk==3.1.2"]
+# CPU-only metadata dependency: on a CUDA host, install the GPU wheel instead, see
+# README.md ("Validate on a local GPU"), e.g.:
+#   pip install --upgrade --no-cache-dir llama-cpp-python \
+#     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+gguf = ["llama-cpp-python>=0.3", "huggingface_hub>=0.24"]
 
 [project.scripts]
 aas-nim = "aas_nim_validation.cli:main"

@@ -124,6 +124,62 @@ Lệnh in bảng trong terminal và tạo `artifacts/leaderboard.html`. Có th�
 aas-nim leaderboard --csv artifacts/leaderboard.csv
 ```
 
+## Validate trên GPU thật (GGUF qua llama.cpp, ví dụ thuê H100)
+
+`aas-nim validate` (NIM) chỉ là một xấp xỉ: model host trên NIM và timing của nó khác hẳn model
+GGUF thật mà notebook gốc chạy trên 2xT4 (đã kiểm chứng trực tiếp — latency qua NIM chỉ
+~1-4s/candidate trong khi comment của các attack variant ghi nhận backend GGUF thật ~8.5-20s/
+candidate). Điều đó có nghĩa mọi tinh chỉnh phụ thuộc thời gian (`MARGIN_S`,
+`SPLIT_THRESHOLD_S`, ...) không thể kiểm chứng đáng tin cậy qua đường NIM.
+
+`aas-nim validate-gguf` chạy thẳng 2 file GGUF thật (cùng file notebook Kaggle dùng) qua
+`llama-cpp-python`, trên GPU của bạn — dùng để có timing sát thực tế hơn, và nếu thuê một GPU
+mạnh (vd. H100 80GB) thay vì 2xT4 miễn phí của Kaggle thì mỗi lượt validate xong nhanh hơn nhiều,
+lặp lại được nhiều vòng hơn trong cùng thời gian.
+
+### Cài đặt
+
+```bash
+pip install -e '.[gguf]'
+# Trên máy có CUDA, cài lại bằng wheel GPU (bản CPU mặc định sẽ rất chậm):
+pip install --upgrade --no-cache-dir llama-cpp-python \
+  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+```
+
+Tải sẵn 2 file GGUF (giống notebook gốc) rồi trỏ đường dẫn qua biến môi trường hoặc cờ CLI:
+
+```dotenv
+GPT_OSS_MODEL_PATH=/data/models/gpt-oss-20b-Q4_K_M.gguf
+GEMMA_MODEL_PATH=/data/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
+```
+
+Nếu không đặt sẵn, `validate-gguf` sẽ tự tải từ Hugging Face (`unsloth/gpt-oss-20b-GGUF`,
+`unsloth/gemma-4-26B-A4B-it-GGUF`) — nên tải một lần rồi trỏ path để không tải lại mỗi lần chạy.
+
+### Chạy
+
+```bash
+aas-nim validate-gguf --attack attack.py --budget-s 600
+```
+
+Mặc định chạy tuần tự cả `gpt_oss` và `gemma` (load model này, chạy xong, unload, load model kia
+— giống cách grader thật chỉ giữ một model trong bộ nhớ tại một thời điểm). Có thể chọn riêng
+từng model bằng `--model gpt_oss` / `--model gemma` (lặp lại để chạy cả hai).
+
+Các cờ tinh chỉnh hiệu năng llama.cpp (mặc định đã đặt hợp lý cho một GPU nhanh, nhiều VRAM như
+H100 — batch lớn hơn + flash attention giúp giảm thời gian mỗi candidate so với mặc định của SDK):
+
+```bash
+aas-nim validate-gguf --attack attack.py --budget-s 9000 \
+  --n-batch 2048 --n-ubatch 1024 \
+  --n-gpu-layers -1 \
+  --main-gpu 0
+# --no-flash-attn nếu bản llama-cpp-python của bạn không có kernel flash attention
+```
+
+Artifacts ghi cùng cấu trúc `artifacts/runs/<attack>_<timestamp>/<model>/` như đường NIM, nên
+`aas-nim leaderboard` gộp chung được cả hai loại lượt chạy.
+
 ## Khác biệt cần lưu ý
 
 - Đây là local approximation: NIM model/runtime có thể khác model GGUF và sampling của public
