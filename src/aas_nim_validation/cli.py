@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("--budget-s", type=float)
     validate.add_argument("--env", choices=("gym", "sandbox"), default="gym")
+    validate.add_argument(
+        "--sequential", action="store_true",
+        help="Validate models one at a time instead of concurrently (default: concurrent)",
+    )
 
     validate_gguf = subparsers.add_parser(
         "validate-gguf",
@@ -176,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         models=tuple(args.models) if args.models else None,
         budget_s=args.budget_s,
         env_selection=EnvSelection(args.env),
+        parallel=not args.sequential,
     )
     print("\nCombined summary:")
     print(json.dumps(result, indent=2, ensure_ascii=False))

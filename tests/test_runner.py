@@ -43,7 +43,7 @@ def test_runner_smoke_without_network(monkeypatch, tmp_path):
     )
 
     result = runner.validate_models(
-        attack_path=Path(__file__).parents[1] / "attacks" / "template.py",
+        attack_path=Path(__file__).parents[1] / "solution" / "template.py",
         artifacts_dir=tmp_path,
         settings=settings,
         env_selection=EnvSelection.GYM,

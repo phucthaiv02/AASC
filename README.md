@@ -88,7 +88,7 @@ Mỗi lần validate tự tạo một thư mục theo tên file attack và thờ
 artifacts/runs/<tên-file>_<YYYYMMDD_HHMMSS_microseconds>/
 ```
 
-Ví dụ, `--attack attacks/live_fill_m47.py` có thể tạo
+Ví dụ, `--attack solution/live_fill_m47.py` có thể tạo
 `artifacts/runs/live_fill_m47_20260812_143005_123456/`. Mỗi model ghi vào thư mục con
 `<model>/` của run đó:
 
@@ -103,12 +103,12 @@ notebook. Vẫn có thể truyền `--artifacts-dir` nếu cần chỉ định t
 
 ## Attack variants và leaderboard
 
-Lưu các biến thể độc lập trong [`attacks/`](attacks/README.md). Tên file và timestamp được dùng
+Lưu các biến thể độc lập trong [`solution/`](solution/README.md). Tên file và timestamp được dùng
 tự động để giữ riêng kết quả của từng lần chạy:
 
 ```bash
 aas-nim validate \
-  --attack attacks/live_fill_m47.py \
+  --attack solution/live_fill_m47.py \
   --budget-s 300
 ```
 

@@ -33,7 +33,7 @@ def test_validate_gguf_models_smoke_without_gpu(tmp_path):
     fake_weights.write_bytes(b"")
 
     result = validate_gguf_models(
-        attack_path=Path(__file__).parents[1] / "attacks" / "template.py",
+        attack_path=Path(__file__).parents[1] / "solution" / "template.py",
         artifacts_dir=tmp_path / "artifacts",
         models=("gpt_oss",),
         budget_s=1.0,
