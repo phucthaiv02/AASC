@@ -93,11 +93,6 @@ BANDIT_EPSILON = 0.1
 
 # ---- Adaptive slack-aware severity stacking ---------------------------------
 ADAPTIVE_EXTENSION = True
-# Initial cost guess for an extension kind before it has been timed for real,
-# scaled by that kind's hop count relative to EXT_BASELINE_HOPS (a 4-hop kind
-# needs roughly 2x a 2-hop kind's round-trip, all else equal).
-ASSUMED_EXTENSION_FACTOR = 2.0
-EXT_BASELINE_HOPS = 2
 # Only extend when projecting the chosen kind's pace across every remaining
 # slot still needed to reach `cap` would use at most this fraction of the
 # remaining wall-clock AND remaining replay-safe budget.
@@ -288,6 +283,57 @@ class _ValueBandit:
         self.latency_sum[arm] += elapsed
 
 
+class _SlackDiag:
+    """Diagnostic-only counters for one investigative run: how often the slack
+    gate approved vs rejected an extension proposal, the range of the computed
+    per-slot budgets/cost estimates it saw, and every point where `slowest`
+    increased. Doesn't affect behavior -- lets one real run reveal WHY
+    extension is under-used instead of guessing blind from aggregate stats."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.approved = 0
+        self.rejected_wall = 0
+        self.rejected_replay = 0
+        self.wall_pace_min = float("inf")
+        self.wall_pace_max = 0.0
+        self.replay_pace_min = float("inf")
+        self.replay_pace_max = 0.0
+        self.est_cost_min = float("inf")
+        self.est_cost_max = 0.0
+        self.first_rejected_idx: int | None = None
+        self.last_rejected_idx: int | None = None
+        self.slowest_jumps: list[tuple[int, float]] = []
+
+    def record(
+        self,
+        *,
+        idx: int,
+        wall_pace: float,
+        replay_pace: float,
+        est_cost: float,
+        wall_ok: bool,
+        replay_ok: bool,
+    ) -> None:
+        self.attempts += 1
+        self.wall_pace_min = min(self.wall_pace_min, wall_pace)
+        self.wall_pace_max = max(self.wall_pace_max, wall_pace)
+        self.replay_pace_min = min(self.replay_pace_min, replay_pace)
+        self.replay_pace_max = max(self.replay_pace_max, replay_pace)
+        self.est_cost_min = min(self.est_cost_min, est_cost)
+        self.est_cost_max = max(self.est_cost_max, est_cost)
+        if wall_ok and replay_ok:
+            self.approved += 1
+        else:
+            if not wall_ok:
+                self.rejected_wall += 1
+            if not replay_ok:
+                self.rejected_replay += 1
+            if self.first_rejected_idx is None:
+                self.first_rejected_idx = idx
+            self.last_rejected_idx = idx
+
+
 class AttackAlgorithm(AttackAlgorithmBase):
     """Single-hop SECRET_MARKER http.post, live per-model validation-fill, with
     an adaptive template bandit AND an adaptive extension-kind bandit."""
@@ -357,9 +403,6 @@ class AttackAlgorithm(AttackAlgorithmBase):
             self.config.get("adaptive_extension", ADAPTIVE_EXTENSION)
         )
         extension_kinds = tuple(self.config.get("extension_kinds", EXTENSION_KINDS))
-        assumed_extension_factor = float(
-            self.config.get("assumed_extension_factor", ASSUMED_EXTENSION_FACTOR)
-        )
         slack_safety_frac = float(self.config.get("slack_safety_frac", SLACK_SAFETY_FRAC))
         ext_bandit = (
             _ValueBandit(
@@ -371,6 +414,7 @@ class AttackAlgorithm(AttackAlgorithmBase):
             if adaptive_extension and extension_kinds
             else None
         )
+        slack_diag = _SlackDiag() if ext_bandit is not None else None
 
         # One-time UNTIMED warm-up pays the model-load cost BEFORE the loop, so it
         # never inflates `slowest` and stops the fill at ~1 candidate. Its outcome
@@ -429,22 +473,55 @@ class AttackAlgorithm(AttackAlgorithmBase):
             if ext_bandit is not None and burst_k == 1 and not arm_exploring:
                 proposed = ext_bandit.select()
                 name, proposed_hops, msg_fn = extension_kinds[proposed]
-                fallback_cost = (
-                    slowest * assumed_extension_factor * (proposed_hops / EXT_BASELINE_HOPS)
-                )
-                est_cost = ext_bandit.mean_latency(proposed, fallback_cost)
-                remaining_slots = max(cap - len(cands), 1)
-                if _slack_allows(
-                    remaining_slots=remaining_slots,
-                    wall_time_left=wall_deadline - time.monotonic(),
-                    replay_time_left=replay_cap - replay_cost,
-                    replay_cost_coef=replay_cost_coef,
-                    est_cost=est_cost,
-                    safety_frac=slack_safety_frac,
-                ):
+                if ext_bandit.is_exploring(proposed):
+                    # Forced exploration is UNCONDITIONAL, matching the template
+                    # bandit's own forced exploration: every kind gets its
+                    # min_trials of real data no matter what, bounded to
+                    # n_kinds * min_trials probes total (a handful of seconds,
+                    # same accepted-cost philosophy as the untimed warmup call).
+                    # The alternative -- gating even the FIRST trial on a
+                    # slack estimate -- has no real data to estimate from yet,
+                    # so it falls back to a guess built from `slowest`; once
+                    # `slowest` is inflated by a single latency outlier (it
+                    # never decays), that guess can permanently veto an arm's
+                    # very first trial, so it can never earn the real data that
+                    # would correct the guess -- a self-reinforcing lockout
+                    # confirmed live (extra_posts_4 stuck at n=0 for an entire
+                    # run after one early outlier).
                     ext_idx = proposed
                     ext_hops = proposed_hops
                     ext_message = msg_fn(idx)
+                else:
+                    # Past forced exploration: real per-arm latency data exists,
+                    # so the slack gate now judges affordability off measured
+                    # cost, not a guess.
+                    est_cost = ext_bandit.mean_latency(proposed, 0.0)
+                    remaining_slots = max(cap - len(cands), 1)
+                    wall_time_left = wall_deadline - time.monotonic()
+                    replay_time_left = replay_cap - replay_cost
+                    allowed = _slack_allows(
+                        remaining_slots=remaining_slots,
+                        wall_time_left=wall_time_left,
+                        replay_time_left=replay_time_left,
+                        replay_cost_coef=replay_cost_coef,
+                        est_cost=est_cost,
+                        safety_frac=slack_safety_frac,
+                    )
+                    if slack_diag is not None:
+                        wall_pace = (wall_time_left / remaining_slots) * slack_safety_frac
+                        replay_pace = (replay_time_left / remaining_slots) * slack_safety_frac
+                        slack_diag.record(
+                            idx=idx,
+                            wall_pace=wall_pace,
+                            replay_pace=replay_pace,
+                            est_cost=est_cost,
+                            wall_ok=est_cost <= wall_pace,
+                            replay_ok=(est_cost * replay_cost_coef) <= replay_pace,
+                        )
+                    if allowed:
+                        ext_idx = proposed
+                        ext_hops = proposed_hops
+                        ext_message = msg_fn(idx)
             messages = (msg, ext_message) if ext_idx is not None else (msg,)
             idx += 1
 
@@ -466,6 +543,8 @@ class AttackAlgorithm(AttackAlgorithmBase):
                 # Env died mid-fill: return the fired-so-far, don't discard them.
                 break
             elapsed = time.monotonic() - t0
+            if slack_diag is not None and elapsed > slowest:
+                slack_diag.slowest_jumps.append((idx, round(elapsed, 2)))
             slowest = max(slowest, elapsed, LAT_FLOOR_S)
             if template_bandit is not None and arm is not None:
                 template_bandit.update(arm, 1.0 if fired else 0.0, primary_elapsed)
@@ -499,6 +578,23 @@ class AttackAlgorithm(AttackAlgorithmBase):
             print(
                 f"[burst_adaptive] extension stats: {stats} | "
                 f"kept_extended={kept_extended}/{len(cands)}"
+            )
+        if slack_diag is not None:
+            print(
+                "[burst_adaptive] slack decisions: "
+                f"attempts={slack_diag.attempts} approved={slack_diag.approved} "
+                f"rejected_wall={slack_diag.rejected_wall} rejected_replay={slack_diag.rejected_replay} | "
+                f"wall_pace_allowed=[{slack_diag.wall_pace_min:.2f}s..{slack_diag.wall_pace_max:.2f}s] "
+                f"replay_pace_allowed=[{slack_diag.replay_pace_min:.2f}s..{slack_diag.replay_pace_max:.2f}s] "
+                f"est_cost=[{slack_diag.est_cost_min:.2f}s..{slack_diag.est_cost_max:.2f}s] | "
+                f"first_rejected_idx={slack_diag.first_rejected_idx} "
+                f"last_rejected_idx={slack_diag.last_rejected_idx}"
+            )
+            jumps = slack_diag.slowest_jumps
+            shown = jumps if len(jumps) <= 20 else jumps[:10] + jumps[-10:]
+            print(
+                f"[burst_adaptive] slowest final={slowest:.2f}s over {len(jumps)} jumps"
+                f"{' (first/last 10 shown)' if len(jumps) > 20 else ''}: {shown}"
             )
         return cands
 
