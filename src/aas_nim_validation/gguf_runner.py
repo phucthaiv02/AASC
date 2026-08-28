@@ -178,29 +178,71 @@ def validate_gguf_models(
             model_path=model_paths.get(model),
             llama_cls=llama_cls,
         )
+        # ``evaluate_redteam`` raises a bare, UNCAUGHT ``TimeoutError`` if
+        # either the attack-generation or the candidate-replay phase overruns
+        # its own budget window (each phase gets its own separate budget_s --
+        # a fast generation phase can hand replay far more candidates than
+        # replay's OWN window can get through in time). Unlike the real
+        # competition gateway (which degrades gracefully, keeping whatever
+        # replay finished before its deadline), this SDK path has no such
+        # fallback: left unhandled here it would abort the WHOLE sequential
+        # loop, losing every model not yet evaluated (and, worse on a rented
+        # GPU, skip the ``finally`` unload if not careful). Catching it means
+        # one model's timeout is recorded as a zero-score, clearly-errored
+        # row and the loop still moves on to the next model.
         try:
-            with RunDiagnostics(
-                EvaluatorVerbosity.DEBUG,
-                transcript_file=model_dir / "transcript.log",
-                event_log_file=model_dir / "framework.jsonl",
-                agent_debug_file=model_dir / "agent-debug.jsonl",
-            ) as diagnostics:
-                execution = evaluate_redteam(
-                    attack_class,
-                    budget_s=budget_s,
-                    agent_factory=agent_factory,
-                    agent_label=f"gguf:{model}",
-                    env_selection=env_selection,
-                    fixtures_dir=fixtures_dir,
-                    diagnostics=diagnostics,
-                    attack_env_seed=attack_seed,
-                    attack_run_config=AttackRunConfig(
-                        time_budget_s=budget_s,
-                        max_tool_hops=max_tool_hops,
-                    ),
-                )
-        finally:
-            unload_gguf_server(server, label=model)
+            try:
+                with RunDiagnostics(
+                    EvaluatorVerbosity.DEBUG,
+                    transcript_file=model_dir / "transcript.log",
+                    event_log_file=model_dir / "framework.jsonl",
+                    agent_debug_file=model_dir / "agent-debug.jsonl",
+                ) as diagnostics:
+                    execution = evaluate_redteam(
+                        attack_class,
+                        budget_s=budget_s,
+                        agent_factory=agent_factory,
+                        agent_label=f"gguf:{model}",
+                        env_selection=env_selection,
+                        fixtures_dir=fixtures_dir,
+                        diagnostics=diagnostics,
+                        attack_env_seed=attack_seed,
+                        attack_run_config=AttackRunConfig(
+                            time_budget_s=budget_s,
+                            max_tool_hops=max_tool_hops,
+                        ),
+                    )
+            finally:
+                unload_gguf_server(server, label=model)
+        except TimeoutError as err:
+            summary = {
+                "model": model,
+                "score_normalized_0_to_1000": 0.0,
+                "score_raw": 0.0,
+                "findings_count": 0,
+                "unique_cells": 0,
+                "unique_canonical_cells": 0,
+                "evaluation_time_s": time.time() - started_at,
+                "wall_time_s": time.time() - started_at,
+                "guardrail_id": None,
+                "guardrail_version": None,
+                "env": env_selection.value,
+                "seed": attack_seed,
+                "budget_s": budget_s,
+                "backend": "gguf_llama_cpp",
+                "error": str(err),
+                "error_type": type(err).__name__,
+            }
+            (model_dir / "summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            print(
+                f"[{model}] evaluation TIMED OUT ({err}) -- generation likely handed "
+                f"replay more candidates than its own {budget_s:.0f}s budget could "
+                f"get through. Recorded as a zero-score row; see {model_dir}/summary.json."
+            )
+            summaries.append(summary)
+            continue
 
         attack = execution.attack
         if attack is None:

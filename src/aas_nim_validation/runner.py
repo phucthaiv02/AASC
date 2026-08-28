@@ -45,6 +45,36 @@ def _write_findings(path: Path, findings: list[Any]) -> None:
             handle.write("\n")
 
 
+def _error_summary(
+    *, model: str, env_selection: EnvSelection, settings: Settings,
+    selected_budget: float, started_at: float, err: BaseException,
+) -> dict[str, Any]:
+    """Summary shape for a model whose evaluation didn't complete.
+
+    ``score_normalized_0_to_1000: 0.0`` (not ``None``) so a caller that sums
+    scores across models (e.g. ``local_public_mean``) doesn't need a null
+    check -- a failed model just contributes zero, like a real all-timeout row
+    would score.
+    """
+    return {
+        "model": model,
+        "score_normalized_0_to_1000": 0.0,
+        "score_raw": 0.0,
+        "findings_count": 0,
+        "unique_cells": 0,
+        "unique_canonical_cells": 0,
+        "evaluation_time_s": time.time() - started_at,
+        "wall_time_s": time.time() - started_at,
+        "guardrail_id": None,
+        "guardrail_version": None,
+        "env": env_selection.value,
+        "seed": settings.attack_seed,
+        "budget_s": selected_budget,
+        "error": str(err),
+        "error_type": type(err).__name__,
+    }
+
+
 def _validate_one_model(
     *,
     model: str,
@@ -61,37 +91,66 @@ def _validate_one_model(
     model_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.time()
 
-    with RunDiagnostics(
-        EvaluatorVerbosity.DEBUG,
-        transcript_file=model_dir / "transcript.log",
-        event_log_file=model_dir / "framework.jsonl",
-        agent_debug_file=model_dir / "agent-debug.jsonl",
-    ) as diagnostics:
-        debug_sink = diagnostics.make_agent_debug_sink()
+    # ``evaluate_redteam`` (and the ``eval_attack`` it wraps) raises a bare,
+    # UNCAUGHT ``TimeoutError`` if either the attack-generation or the
+    # candidate-replay phase overruns its own budget window (each phase gets
+    # its own separate budget_s -- a fast generation phase can hand replay
+    # far more candidates than replay's OWN window can get through in time,
+    # especially at NIM speed with a short --budget-s). Unlike the real
+    # competition gateway (which degrades gracefully, keeping whatever replay
+    # finished before its deadline), this SDK path has no such fallback: left
+    # unhandled, the exception unwinds through the diagnostics context
+    # manager and can crash the whole process. Catching it here means one
+    # model's timeout doesn't lose the other model's results (parallel runs)
+    # or corrupt the whole CLI invocation -- it's recorded as a zero-score,
+    # clearly-errored row instead.
+    try:
+        with RunDiagnostics(
+            EvaluatorVerbosity.DEBUG,
+            transcript_file=model_dir / "transcript.log",
+            event_log_file=model_dir / "framework.jsonl",
+            agent_debug_file=model_dir / "agent-debug.jsonl",
+        ) as diagnostics:
+            debug_sink = diagnostics.make_agent_debug_sink()
 
-        def agent_factory() -> NIMChatCompletionsAgent:
-            return NIMChatCompletionsAgent(
-                client=client,
-                model=model,
-                max_tokens=settings.max_tokens,
-                temperature=settings.temperature,
-                debug_sink=debug_sink,
+            def agent_factory() -> NIMChatCompletionsAgent:
+                return NIMChatCompletionsAgent(
+                    client=client,
+                    model=model,
+                    max_tokens=settings.max_tokens,
+                    temperature=settings.temperature,
+                    debug_sink=debug_sink,
+                )
+
+            execution = evaluate_redteam(
+                attack_class,
+                budget_s=selected_budget,
+                agent_factory=agent_factory,
+                agent_label=f"nim:{model}",
+                env_selection=env_selection,
+                fixtures_dir=None,
+                diagnostics=diagnostics,
+                attack_env_seed=settings.attack_seed,
+                attack_run_config=AttackRunConfig(
+                    time_budget_s=selected_budget,
+                    max_tool_hops=settings.max_tool_hops,
+                ),
             )
-
-        execution = evaluate_redteam(
-            attack_class,
-            budget_s=selected_budget,
-            agent_factory=agent_factory,
-            agent_label=f"nim:{model}",
-            env_selection=env_selection,
-            fixtures_dir=None,
-            diagnostics=diagnostics,
-            attack_env_seed=settings.attack_seed,
-            attack_run_config=AttackRunConfig(
-                time_budget_s=selected_budget,
-                max_tool_hops=settings.max_tool_hops,
-            ),
+    except TimeoutError as err:
+        summary = _error_summary(
+            model=model, env_selection=env_selection, settings=settings,
+            selected_budget=selected_budget, started_at=started_at, err=err,
         )
+        (model_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(
+            f"[{model}] evaluation TIMED OUT ({err}) -- generation likely handed "
+            f"replay more candidates than its own {selected_budget:.0f}s budget "
+            "could get through. Recorded as a zero-score row; see "
+            f"{model_dir}/summary.json."
+        )
+        return summary
 
     attack = execution.attack
     if attack is None:
