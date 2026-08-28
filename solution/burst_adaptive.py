@@ -78,7 +78,7 @@ FILL_BUDGET_FRAC = 0.95
 HARD_N_CAP = 2000
 BURST_K = 1
 REPLAY_SAFE_SIZING = True
-REPLAY_SAFE_FRAC = 0.97
+REPLAY_SAFE_FRAC = 0.80
 PROBE_HOPS = 1
 REPLAY_COST_COEF = 1.75
 REPLAY_BUDGET_MULT = 1.0
@@ -96,11 +96,31 @@ ADAPTIVE_EXTENSION = True
 # Only extend when projecting the chosen kind's pace across every remaining
 # slot still needed to reach `cap` would use at most this fraction of the
 # remaining wall-clock AND remaining replay-safe budget.
-SLACK_SAFETY_FRAC = 0.85
+SLACK_SAFETY_FRAC = 0.60
 # Fresh, far-away index space for extension URLs so they never collide with a
 # primary candidate's URL (mirrors WARMUP_IDX's "far away" convention).
 EXTRA_POST_BASE = 500_000
 MAX_EXTRA_POSTS = 4
+
+# ---- Timeout safety hardening -------------------------------------------------
+# The real Kaggle gateway (jed_attack_134815/jed_attack_gateway.py) drives every
+# env op through a command-response IPC round-trip that costs real wall-clock
+# time `slowest` never sees (it only measures this process's own in-loop
+# timing, no network/gRPC hop). If generation genuinely times out on the real
+# gateway, the fallback is NOT the fired-only candidates this loop would
+# return -- it's the gateway's own raw log of every reset+interact pair
+# attempted so far, fired or not (see `_run_attack_for_model`'s
+# `completed_candidates` / `generation_timed_out` branch). That fallback is far
+# worse than stopping early, so every budget knob below is biased hard toward
+# finishing under budget rather than using all of it.
+IPC_SAFETY_MULT = 1.5          # inflates every latency estimate used to decide
+                                # whether to try one more candidate/extension,
+                                # covering IPC/gRPC overhead `slowest` can't see
+MAX_TOTAL_ATTEMPTS_MULT = 3.0  # hard backstop on TOTAL env.interact() calls for
+                                # primary attempts (kept + discarded), independent
+                                # of any latency estimate -- caps worst-case
+                                # generation-phase exposure even if every
+                                # wall-clock projection above is wrong
 
 
 def _alpha2(i: int) -> str:
@@ -387,6 +407,11 @@ class AttackAlgorithm(AttackAlgorithmBase):
         replay_cost_coef = float(self.config.get("replay_cost_coef", REPLAY_COST_COEF))
         bandit_seed = self.config.get("bandit_seed", getattr(env, "seed", 0))
         rng = random.Random(int(bandit_seed) if bandit_seed is not None else 0)
+        ipc_safety_mult = float(self.config.get("ipc_safety_mult", IPC_SAFETY_MULT))
+        max_total_attempts = max(
+            1,
+            int(cap * float(self.config.get("max_total_attempts_mult", MAX_TOTAL_ATTEMPTS_MULT))),
+        )
 
         template_bandit = (
             _ValueBandit(
@@ -434,9 +459,17 @@ class AttackAlgorithm(AttackAlgorithmBase):
         replay_cost = 0.0
         cands: list[AttackCandidate] = []
         idx = 0
+        attempts = 0
         while len(cands) < cap:
+            # Hard backstop, independent of any latency estimate: caps the
+            # TOTAL number of real env.interact() round-trips this loop can
+            # ever make, so a bad `slowest`/IPC estimate can only waste a
+            # bounded number of probes, never overrun the real gateway's
+            # generation deadline outright.
+            if attempts >= max_total_attempts:
+                break
             if replay_safe_sizing:
-                next_wall = slowest * SLOWEST_MULT
+                next_wall = slowest * SLOWEST_MULT * ipc_safety_mult
                 if _replay_stop(
                     replay_cost,
                     time.monotonic(),
@@ -448,7 +481,7 @@ class AttackAlgorithm(AttackAlgorithmBase):
                     break
             else:
                 margin = _adaptive_margin(slowest, margin_s, floor_min, slowest_coef)
-                if time.monotonic() + max(slowest * SLOWEST_MULT, margin) >= deadline:
+                if time.monotonic() + max(slowest * SLOWEST_MULT * ipc_safety_mult, margin) >= deadline:
                     break
 
             arm = template_bandit.select() if template_bandit is not None else None
@@ -494,8 +527,10 @@ class AttackAlgorithm(AttackAlgorithmBase):
                 else:
                     # Past forced exploration: real per-arm latency data exists,
                     # so the slack gate now judges affordability off measured
-                    # cost, not a guess.
-                    est_cost = ext_bandit.mean_latency(proposed, 0.0)
+                    # cost, not a guess -- inflated by ipc_safety_mult since the
+                    # measured cost is still local-only timing, blind to the
+                    # real gateway's per-op IPC round-trip.
+                    est_cost = ext_bandit.mean_latency(proposed, 0.0) * ipc_safety_mult
                     remaining_slots = max(cap - len(cands), 1)
                     wall_time_left = wall_deadline - time.monotonic()
                     replay_time_left = replay_cap - replay_cost
@@ -524,6 +559,7 @@ class AttackAlgorithm(AttackAlgorithmBase):
                         ext_message = msg_fn(idx)
             messages = (msg, ext_message) if ext_idx is not None else (msg,)
             idx += 1
+            attempts += 1
 
             t0 = time.monotonic()
             try:
@@ -556,6 +592,11 @@ class AttackAlgorithm(AttackAlgorithmBase):
                 cands.append(AttackCandidate.from_messages(messages))
                 if replay_safe_sizing:
                     replay_cost += elapsed * replay_cost_coef
+        print(
+            f"[burst_adaptive] attempts={attempts}/{max_total_attempts} "
+            f"kept={len(cands)}/{cap} ipc_safety_mult={ipc_safety_mult} "
+            f"replay_safe_frac={replay_safe_frac} slack_safety_frac={slack_safety_frac}"
+        )
         if template_bandit is not None:
             # Self-diagnosing: prints regardless of how the loop ended (deadline,
             # cap, or a mid-fill exception), so a slow/unreliable arm that ate
