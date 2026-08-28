@@ -19,6 +19,12 @@ def test_default_run_artifacts_dir_uses_attack_name_and_timestamp():
     assert path == Path("artifacts/runs/live_fill_20260812_143005_123456")
 
 
+def test_leaderboard_reads_validation_artifacts_by_default():
+    args = build_parser().parse_args(["leaderboard"])
+
+    assert args.artifacts_dir == Path("artifacts/validation")
+
+
 def test_validate_artifacts_dir_can_still_be_overridden():
     args = build_parser().parse_args(
         ["validate", "--attack", "attack.py", "--artifacts-dir", "custom/run"]

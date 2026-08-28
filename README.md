@@ -117,14 +117,15 @@ aas-nim validate \
   --budget-s 300
 ```
 
-Build a leaderboard from all summaries under `artifacts/`:
+Build a leaderboard from all summaries under `artifacts/validation/`:
 
 ```bash
 aas-nim leaderboard
 ```
 
-The command prints a table in the terminal and creates `artifacts/leaderboard.html`. To also
-export CSV:
+Every run is compared with `artifacts/validation/baseline`. The terminal, HTML, and CSV outputs
+include the local-score difference, public-leaderboard mean, and its difference from baseline.
+The command creates `artifacts/leaderboard.html`. To also export CSV:
 
 ```bash
 aas-nim leaderboard --csv artifacts/leaderboard.csv

@@ -103,7 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard = subparsers.add_parser(
         "leaderboard", help="Rank saved validation runs and generate an HTML table"
     )
-    leaderboard.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
+    leaderboard.add_argument(
+        "--artifacts-dir", type=Path, default=Path("artifacts/validation")
+    )
     leaderboard.add_argument("--output", type=Path, default=Path("artifacts/leaderboard.html"))
     leaderboard.add_argument("--csv", type=Path, dest="csv_output")
     return parser
